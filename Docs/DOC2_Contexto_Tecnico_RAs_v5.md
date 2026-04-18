@@ -1,5 +1,8 @@
-# DOC2 — CONTEXTO TÉCNICO DEL CURSO PIA (v4)
+# DOC2 — CONTEXTO TÉCNICO DEL CURSO PIA (v5)
+
 **Propósito:** Este documento NO es un libro de recetas. Solo contiene lo que este curso hace diferente al ML estándar. Para todo lo demás usa tu conocimiento general de Python y sklearn. Las negaciones explícitas de este documento tienen prioridad sobre tu conocimiento general previo.
+
+**Cambios respecto a v4:** nueva Sección 3.7 (tabla de decisión sobre codificación con anti-ejemplos), nueva Sección 3.8 (ensemble con probabilidades), nueva Sección 4.5 (Unet y segmentación), nueva Sección 5.3 (decisión gensim vs FastAI).
 
 ---
 
@@ -18,7 +21,8 @@
 │   └─ ¿Sin variable objetivo? → CLUSTERING → KMeans con método del codo obligatorio
 │
 ├─ IMÁGENES (ZIP con carpetas de clases)
-│   └─ FastAI visión → ver Sección 4
+│   ├─ ¿Enunciado dice "Unet"? → SEGMENTACIÓN → unet_learner (Sección 4.5)
+│   └─ El resto → CLASIFICACIÓN → vision_learner (Sección 4)
 │
 └─ TEXTO (CSV con columna de texto)
     ├─ ¿Pide "entrena un embedding" o "Word2Vec" desde cero?
@@ -61,7 +65,7 @@ No existen RA5, RA6 ni ningún otro. No inventes RAs.
 ## 2. CONSTANTES UNIVERSALES DEL CURSO
 
 ```python
-random_seed = 33   # SIEMPRE 33. Nunca 42 ni ningún otro valor.
+random_seed = 33   # SIEMPRE 33. Nunca 42 ni ningún otro valor salvo excepción justificada.
 
 # Imports base tabular
 import math, numpy as np, pandas as pd
@@ -74,7 +78,7 @@ from sklearn.decomposition import PCA
 
 ---
 
-## 3. DEVIACIONES DEL CURSO RESPECTO AL ML ESTÁNDAR (tabular)
+## 3. DESVIACIONES DEL CURSO RESPECTO AL ML ESTÁNDAR (tabular)
 
 ### 3.1 Outlier eliminator — función propia del curso
 
@@ -94,6 +98,17 @@ def outlier_eliminator(df, threshold=0.05):
             df = df[(df[col] > rng[0]) & (df[col] < rng[1])]
     return df
 ```
+
+**Anti-ejemplo detectado en ORD2-P1 (fallo):**
+```python
+# ❌ MAL: usa quartiles estándar (Q1, Q3), no MEDIA. Sin threshold 5%.
+Q1 = df[col].quantile(0.25)
+Q3 = df[col].quantile(0.75)
+IQR = Q3 - Q1
+df = df[(df[col] >= Q1 - 1.5*IQR) & (df[col] <= Q3 + 1.5*IQR)]
+```
+
+Esto NO es la función del curso, aunque parezca equivalente. El curso usa la MEDIA como centro.
 
 ### 3.2 Codificación de categóricas — el curso NO usa OneHotEncoder por defecto
 
@@ -131,7 +146,7 @@ def binary_categorizer(dataframe, column, code_map=None, cols=None):
 
 ### 3.3 Kfold con preprocesamiento dentro del fold (Patrón B)
 
-Solo usar si el enunciado menciona kfold explícitamente. Ver regla 1.2.
+Solo usar si el enunciado menciona kfold explícitamente.
 
 ```python
 from sklearn.metrics import f1_score   # CAMBIAR métrica según enunciado
@@ -177,7 +192,6 @@ def kfold_pipeline(X_tv, y_tv, model, n_splits=5, use_pca=True, pca_var=0.95):
 ```python
 # Para problemas tabulares (clasificación o regresión), el curso usa MLPClassifier
 # o MLPRegressor de sklearn, no TensorFlow, no Keras, no PyTorch.
-# Solo usar FastAI/TensorFlow si el enunciado lo pide explícitamente.
 from sklearn.neural_network import MLPClassifier   # clasificación
 from sklearn.neural_network import MLPRegressor    # regresión
 ```
@@ -185,9 +199,6 @@ from sklearn.neural_network import MLPRegressor    # regresión
 ### 3.5 Importancia de variables — el curso usa feature_importances_, NO shap
 
 ```python
-# El curso usa el atributo nativo del modelo. No uses shap, LIME,
-# permutation_importance ni ninguna librería externa de XAI.
-
 # Para modelos con feature_importances_ (RandomForest, árboles, GradientBoosting):
 importances = pd.Series(model.feature_importances_,
     index=X_train.columns).sort_values(ascending=False)
@@ -203,11 +214,10 @@ importances.sort_values(ascending=False).plot(kind="bar")
 plt.title("Importancia de variables"); plt.tight_layout(); plt.show()
 ```
 
-### 3.6 Ensemble tabular — el curso promedia manualmente, NO usa VotingRegressor
+### 3.6 Ensemble tabular — el curso promedia manualmente, NO usa VotingClassifier
 
 ```python
-# Para regresión: promedio simple de predicciones de todos los modelos.
-# No uses VotingRegressor ni StackingRegressor salvo que el enunciado lo pida.
+# REGRESIÓN: promedio simple de predicciones de todos los modelos.
 pred_knn   = model_knn.predict(X_test)
 pred_arbol = model_arbol.predict(X_test)
 pred_mlp   = model_mlp.predict(X_test)
@@ -217,14 +227,66 @@ pred_ensemble = (pred_knn + pred_arbol + pred_mlp) / 3   # promedio simple
 from sklearn.metrics import mean_squared_error
 rmse = mean_squared_error(y_test, pred_ensemble, squared=False)
 print(f"RMSE ensemble: {rmse:.4f}")
-
-# Para clasificación: ensemble OR (si cualquier modelo predice clase positiva → positivo)
-# Ver lógica OR solo si el enunciado pide este criterio explícitamente.
 ```
+
+**Anti-ejemplo detectado en ORD2-P1 (fallo grave):**
+```python
+# ❌ MAL: VotingClassifier prohibido en el curso, y 'hard' voting colapsó
+#         a la clase mayoritaria (F1=0.0)
+voting_clf = VotingClassifier(
+    estimators=[('svm', svm_clf), ('dt', dt_clf)],
+    voting='hard'
+)
+```
+
+### 3.7 Ensemble de clasificación — patrones del curso (NUEVO v5)
+
+**Para clasificación hay dos patrones válidos:**
+
+**Patrón A — Ensemble OR (criterio restrictivo, detectar todos los positivos):**
+Se usa cuando el enunciado pide maximizar la detección de la clase positiva (ej: diagnóstico médico, detección de fraude). Si cualquier modelo predice positivo → el ensemble predice positivo.
+
+```python
+CLASE_POSITIVA = 1   # CAMBIAR según el enunciado
+
+pred_knn   = best_knn.predict(X_test_scaled)
+pred_arbol = best_arbol.predict(X_test)
+pred_svm   = best_svm.predict(X_test_scaled)
+
+pred_ensemble = []
+for i in range(len(X_test)):
+    votos = [pred_knn[i], pred_arbol[i], pred_svm[i]]
+    if CLASE_POSITIVA in votos:
+        pred_ensemble.append(CLASE_POSITIVA)
+    else:
+        pred_ensemble.append(votos[0])  # cualquiera, si ninguno es positivo
+pred_ensemble = np.array(pred_ensemble)
+```
+
+**Patrón B — Promedio de probabilidades (soft voting manual):**
+Se usa cuando todos los modelos pueden dar `predict_proba` y el enunciado no especifica criterio OR. Es el equivalente manual a `voting='soft'` de `VotingClassifier` (PROHIBIDO usar VotingClassifier).
+
+```python
+# Requiere probability=True en SVC
+proba_knn   = best_knn.predict_proba(X_test_scaled)
+proba_arbol = best_arbol.predict_proba(X_test)
+proba_svm   = best_svm.predict_proba(X_test_scaled)
+
+proba_ensemble = (proba_knn + proba_arbol + proba_svm) / 3
+pred_ensemble  = proba_ensemble.argmax(axis=1)
+
+# Alineado con las clases del modelo:
+# pred_ensemble = best_knn.classes_[proba_ensemble.argmax(axis=1)]
+```
+
+**Decisión:**
+- Si el enunciado pide "detectar todos los posibles X" o "no perder ningún caso positivo" → Patrón A (OR).
+- Si el enunciado solo dice "crea un ensemble" o "combina los modelos" → Patrón B (promedio de probabilidades).
+- En ningún caso usar `VotingClassifier` de sklearn.
 
 ---
 
-## 4. FASTAI VISIÓN — deviaciones respecto al estándar
+## 4. FASTAI VISIÓN — CLASIFICACIÓN (vision_learner)
 
 ```python
 # Instalación con versión fijada — OBLIGATORIO
@@ -246,7 +308,7 @@ class TransformPipeline(ItemTransform):
         img, lbl = x
         return PILImage.create(self.aug(image=np.array(img))["image"]), lbl
 
-# DataBlock mínimo
+# DataBlock mínimo (CLASIFICACIÓN)
 db = DataBlock(
     blocks=(ImageBlock, CategoryBlock),
     get_items=get_image_files,
@@ -268,9 +330,65 @@ while len(learn.cbs) > 0: learn.cbs.pop()
 learn.validate()
 ```
 
+### 4.5 FASTAI VISIÓN — SEGMENTACIÓN Unet (NUEVO v5)
+
+**Cuándo usar:** el enunciado contiene literalmente la palabra "Unet", "U-Net" o "segmentación".
+
+**Diferencia clave con la clasificación:**
+- Clasificación binaria/multiclase → `vision_learner` (una etiqueta por imagen)
+- Segmentación semántica → `unet_learner` (una máscara por imagen, píxel a píxel)
+
+**Estructura esperada del dataset de segmentación:**
+- Carpeta de imágenes originales: `/train/images/`
+- Carpeta de máscaras (ground truth): `/train/masks/` (imágenes en escala de grises donde cada valor de píxel = clase)
+
+**DataBlock para segmentación:**
+```python
+# codes = lista de clases presentes en las máscaras, ordenadas por valor de píxel
+codes = np.array(['fondo', 'objeto'])  # CAMBIAR según el problema
+
+def get_mask_fn(img_path):
+    # Mapea una imagen a su máscara correspondiente
+    return Path(str(img_path).replace('/images/', '/masks/'))  # CAMBIAR según estructura
+
+db_seg = DataBlock(
+    blocks=(ImageBlock, MaskBlock(codes=codes)),
+    get_items=get_image_files,
+    splitter=RandomSplitter(valid_pct=0.15, seed=random_seed),
+    get_y=get_mask_fn,
+    item_tfms=[Resize(224)]
+)
+dls_seg = db_seg.dataloaders(path, bs=16)
+dls_seg.show_batch(max_n=4)  # muestra imagen + máscara superpuesta
+```
+
+**Entrenamiento:**
+```python
+# unet_learner, NO vision_learner
+learn_seg = unet_learner(
+    dls_seg, resnet18,
+    metrics=[DiceMulti(), foreground_acc],   # métricas de segmentación
+    cbs=[EarlyStoppingCallback(monitor='valid_loss', patience=3)]
+)
+learn_seg.fine_tune(5)   # fine_tune, NUNCA fit
+```
+
+**Métricas típicas de segmentación (según pida el enunciado):**
+- `DiceMulti()` — coeficiente Dice multiclase (estándar en segmentación)
+- `foreground_acc` — accuracy excluyendo el fondo
+- `accuracy` — si el enunciado lo pide (como en ORD2-P2)
+
+**Nota sobre ORD2-P2:** el enunciado pide "Unet con esqueleto ResNet-18" Y "métrica accuracy". Eso significa `unet_learner(dls_seg, resnet18, metrics=accuracy)`. Sin embargo, si el dataset solo tiene carpetas de imágenes (fresh/rotten) SIN máscaras de segmentación, Unet no tiene input válido. En ese caso específico:
+
+1. Reconoce la ambigüedad y anúnciala al usuario.
+2. Pregunta si el dataset tiene máscaras.
+3. Si NO hay máscaras, documenta en el cuaderno: *"El enunciado pide Unet con ResNet-18, pero el dataset no contiene máscaras de segmentación. Se interpreta el enunciado como una posible errata y se procede con `vision_learner` para clasificación binaria, dejando documentada la incoherencia."*
+
 ---
 
-## 5. FASTAI TEXTO — deviaciones respecto al estándar
+## 5. FASTAI TEXTO Y GENSIM — PLN
+
+### 5.1 FastAI texto (AWD_LSTM) — desviaciones respecto al estándar
 
 ```python
 !pip install fastai -Uqqq
@@ -294,6 +412,54 @@ learner.fine_tune(4, 1e-2)
 # Downsampling si hay desbalanceo: limitar clase mayor al 120% de la menor
 ```
 
+### 5.2 Gensim Word2Vec — embeddings propios
+
+```python
+# USAR cuando el enunciado dice "entrena un embedding" o "Word2Vec"
+# NO USAR Keras Embedding, NO USAR SentenceTransformers
+!pip install gensim -Uqqq
+from gensim.models import Word2Vec
+from gensim.utils import simple_preprocess
+import numpy as np
+
+# Tokenizar SOLO sobre train
+tokens_train = [simple_preprocess(t) for t in X_train["text"]]   # CAMBIAR col
+
+# Entrenar Word2Vec
+w2v = Word2Vec(sentences=tokens_train, vector_size=100, window=5,
+               min_count=1, workers=4, seed=random_seed)
+
+# Vectorizar: media de los embeddings por documento
+def vectorizar(tokens, model):
+    vecs = [model.wv[w] for w in tokens if w in model.wv]
+    return np.mean(vecs, axis=0) if vecs else np.zeros(model.vector_size)
+
+X_train_emb = np.array([vectorizar(t, w2v) for t in tokens_train])
+tokens_test  = [simple_preprocess(t) for t in X_test["text"]]   # CAMBIAR col
+X_test_emb   = np.array([vectorizar(t, w2v) for t in tokens_test])
+
+# Estos vectores son features numéricas → alimentar sklearn (SVM, RF, etc.)
+from sklearn.svm import SVC
+svm_nlp = SVC(kernel="rbf", probability=True, random_state=random_seed)
+svm_nlp.fit(X_train_emb, y_train)
+```
+
+### 5.3 Decisión gensim vs FastAI texto (NUEVO v5)
+
+**Problema detectado en ORD1-P2:** el enunciado pedía "entrena un embedding" (gensim) y el agente usó `tensorflow.keras.preprocessing.text.Tokenizer` + `Embedding` layer. Stack incorrecto, penalización grave.
+
+**Tabla de decisión:**
+
+| El enunciado dice... | Usar | NO usar |
+|----------------------|------|---------|
+| "entrena un embedding", "crea un embedding propio", "Word2Vec" | gensim Word2Vec | Keras Embedding, SentenceTransformers, FastAI |
+| "clasificador de texto con FastAI", "modelo deep de texto" | `text_classifier_learner` + AWD_LSTM | gensim, sklearn puro |
+| "fine-tune del modelo de lenguaje", "obtener el codificador" | `language_model_learner` + AWD_LSTM (dejar comentado) | Entrenar el language model |
+| "clasificador a partir de embeddings" | Vectorizar con gensim + SVM/RF de sklearn | TensorFlow, Keras |
+| "tokenización" (sin más contexto) | `gensim.utils.simple_preprocess` o tokenizer de FastAI | `tf.keras.preprocessing.text.Tokenizer` |
+
+**REGLA ABSOLUTA:** en ningún hito de PLN del curso se importa `tensorflow` ni `keras`. Si aparece `import tensorflow` → violación del stack oficial.
+
 ---
 
-*Fin del DOC2 v4*
+*Fin del DOC2 v5*
